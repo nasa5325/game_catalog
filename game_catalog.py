@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 import re
 import csv
+import json
 from decimal import Decimal
 import tkinter as tk
 from pathlib import Path
@@ -54,6 +55,9 @@ class CatalogDB:
                 notes TEXT DEFAULT ''
             )"""
         )
+        self.connection.execute(
+            "CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
         # Add the field to catalogs created by earlier versions of the app.
         columns = {row[1] for row in self.connection.execute("PRAGMA table_info(games)")}
         if "reader_race_score" not in columns:
@@ -102,6 +106,18 @@ class CatalogDB:
 
     def delete(self, game_id: int) -> None:
         self.connection.execute("DELETE FROM games WHERE id = ?", (game_id,))
+        self.connection.commit()
+
+    def get_setting(self, key: str) -> str | None:
+        row = self.connection.execute("SELECT value FROM app_settings WHERE key = ?", (key,)).fetchone()
+        return row[0] if row else None
+
+    def set_setting(self, key: str, value: str) -> None:
+        self.connection.execute(
+            "INSERT INTO app_settings (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
         self.connection.commit()
 
 
@@ -222,6 +238,17 @@ class GameCatalogApp(tk.Tk):
         self.minsize(760, 450)
         self.sort_key = "title"
         self.sort_reverse = False
+        self.available_columns = tuple(key for key, _label, _width in self.COLUMNS if key != "image_path")
+        try:
+            saved_columns = json.loads(self.db.get_setting("visible_columns") or "null")
+        except (json.JSONDecodeError, TypeError):
+            saved_columns = None
+        if isinstance(saved_columns, list):
+            self.visible_columns = tuple(key for key in self.available_columns if key in saved_columns)
+        else:
+            self.visible_columns = self.available_columns
+        if not self.visible_columns:
+            self.visible_columns = self.available_columns
         self._build_ui()
         self.image_refs: list[tk.PhotoImage] = []
         self.refresh()
@@ -258,6 +285,7 @@ class GameCatalogApp(tk.Tk):
         self.year_combo = ttk.Combobox(filters, textvariable=self.year_filter, values=("すべて",), state="readonly", width=12)
         self.year_combo.pack(side="left", padx=(6, 0))
         self.year_combo.bind("<<ComboboxSelected>>", lambda _event: self.refresh())
+        ttk.Button(filters, text="表示列...", command=self.choose_columns).pack(side="right")
 
         body = ttk.Frame(self, padding=(16, 0, 16, 12))
         body.grid(row=2, column=0, sticky="nsew")
@@ -268,6 +296,7 @@ class GameCatalogApp(tk.Tk):
         self.results.columnconfigure(0, weight=1)
         self.results.rowconfigure(0, weight=1)
         self.tree = ttk.Treeview(self.results, columns=[c[0] for c in self.COLUMNS], show="headings", selectmode="browse")
+        self.tree.configure(displaycolumns=self.visible_columns)
         for key, label, width in self.COLUMNS:
             heading = f"{label} ▲" if key == self.sort_key else label
             self.tree.heading(key, text=heading, command=lambda k=key: self.sort_by(k))
@@ -354,6 +383,41 @@ class GameCatalogApp(tk.Tk):
                 heading += " ▼" if self.sort_reverse else " ▲"
             self.tree.heading(column, text=heading)
         self.refresh()
+
+    def choose_columns(self) -> None:
+        dialog = tk.Toplevel(self)
+        dialog.title("表示する列")
+        dialog.transient(self)
+        dialog.grab_set()
+        frame = ttk.Frame(dialog, padding=16)
+        frame.grid(sticky="nsew")
+        ttk.Label(frame, text="一覧に表示する項目を選択してください").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+        variables: dict[str, tk.BooleanVar] = {}
+        labels = {key: label for key, label, _width in self.COLUMNS}
+        for index, key in enumerate(self.available_columns):
+            variable = tk.BooleanVar(value=key in self.visible_columns)
+            variables[key] = variable
+            ttk.Checkbutton(frame, text=labels[key], variable=variable).grid(
+                row=1 + index // 2, column=index % 2, sticky="w", padx=(0, 18), pady=3
+            )
+
+        def apply() -> None:
+            selected = tuple(key for key in self.available_columns if variables[key].get())
+            if not selected:
+                messagebox.showwarning("列を選択", "少なくとも1つの列を選択してください。", parent=dialog)
+                return
+            self.visible_columns = selected
+            self.tree.configure(displaycolumns=selected)
+            self.db.set_setting("visible_columns", json.dumps(selected, ensure_ascii=False))
+            dialog.destroy()
+
+        buttons = ttk.Frame(frame)
+        buttons.grid(row=1 + (len(self.available_columns) + 1) // 2, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        ttk.Button(buttons, text="キャンセル", command=dialog.destroy).pack(side="right", padx=(8, 0))
+        ttk.Button(buttons, text="適用", command=apply).pack(side="right")
+        dialog.bind("<Escape>", lambda _event: dialog.destroy())
+        dialog.wait_visibility()
+        dialog.geometry(f"+{self.winfo_rootx() + 150}+{self.winfo_rooty() + 100}")
 
     def _update_year_filter(self) -> None:
         current = self.year_filter.get()
