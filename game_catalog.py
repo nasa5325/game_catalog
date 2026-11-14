@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 import re
 import csv
+from decimal import Decimal
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -27,6 +28,10 @@ CSV_FIELDS = (
     ("reader_race_score", "読者レース全投票平均スコア"),
     ("image_path", "タイトル画像パス"),
     ("notes", "メモ"),
+)
+GENRES = (
+    "A・ACT", "A・RPG", "ACT", "ADV", "ETC", "PIN", "PUZ", "QIZ", "RAC",
+    "RPG", "SHT", "SHT/SLG", "SLG", "SPT", "TAB", "VCS", "VIC",
 )
 
 
@@ -59,14 +64,18 @@ class CatalogDB:
             self.connection.execute("ALTER TABLE games ADD COLUMN image_path TEXT DEFAULT ''")
         self.connection.commit()
 
-    def list_games(self, query: str = "") -> list[sqlite3.Row]:
+    def list_games(self, query: str = "", genre: str = "", year: str = "") -> list[sqlite3.Row]:
         pattern = f"%{query}%"
         return self.connection.execute(
             """SELECT * FROM games
-               WHERE title LIKE ? OR title_en LIKE ? OR publisher LIKE ?
-                     OR region LIKE ? OR genre LIKE ? OR notes LIKE ?
+               WHERE (title LIKE ? OR title_en LIKE ? OR publisher LIKE ?
+                     OR release_year LIKE ? OR region LIKE ? OR genre LIKE ?
+                     OR reader_race_rank LIKE ? OR reader_race_score LIKE ? OR notes LIKE ?)
+                 AND (? = '' OR genre = ?)
+                 AND (? = '' OR release_year = ?)
                ORDER BY title COLLATE NOCASE, id""",
-            (pattern, pattern, pattern, pattern, pattern, pattern),
+            (pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern,
+             genre, genre, year, year),
         ).fetchall()
 
     def save(self, values: dict[str, str], game_id: int | None = None) -> None:
@@ -129,11 +138,17 @@ class GameDialog(tk.Toplevel):
                 entry.grid(row=0, column=0, sticky="ew")
                 ttk.Button(image_frame, text="参照...", command=lambda e=entry: self._browse_image(e)).grid(row=0, column=1, padx=(6, 0))
                 ttk.Button(image_frame, text="解除", command=lambda e=entry: (e.delete(0, "end"))).grid(row=0, column=2, padx=(4, 0))
+            elif key == "genre":
+                entry = ttk.Combobox(frame, width=35, values=GENRES, state="readonly")
+                entry.grid(row=row, column=1, sticky="ew", pady=5)
             else:
                 entry = ttk.Entry(frame, width=38)
                 entry.grid(row=row, column=1, sticky="ew", pady=5)
             if initial:
-                entry.insert(0, initial[key] or "")
+                if key == "genre":
+                    entry.set(initial[key] or "")
+                else:
+                    entry.insert(0, initial[key] or "")
             self.entries[key] = entry
         notes_row = len(self.FIELDS)
         ttk.Label(frame, text="メモ").grid(row=notes_row, column=0, sticky="nw", padx=(0, 12), pady=5)
@@ -168,10 +183,10 @@ class GameDialog(tk.Toplevel):
             self.entries["title"].focus_set()
             return
         score = self.entries["reader_race_score"].get().strip()
-        if score and not re.fullmatch(r"[0-9]\.[0-9]{4}", score):
+        if score and not re.fullmatch(r"[0-9](?:\.[0-9]{1,4})?", score):
             messagebox.showwarning(
                 "入力を確認",
-                "全投票平均スコアは 6.2934 の形式で入力してください（0.0000〜9.9999）。",
+                "全投票平均スコアは 9、9.42、6.2934 の形式で入力してください（小数点以下0〜4桁、最大9.9999）。",
                 parent=self,
             )
             self.entries["reader_race_score"].focus_set()
@@ -205,6 +220,8 @@ class GameCatalogApp(tk.Tk):
         self.title("メガドライブ ゲームカタログ")
         self.geometry("1050x650")
         self.minsize(760, 450)
+        self.sort_key = "title"
+        self.sort_reverse = False
         self._build_ui()
         self.image_refs: list[tk.PhotoImage] = []
         self.refresh()
@@ -212,7 +229,7 @@ class GameCatalogApp(tk.Tk):
 
     def _build_ui(self) -> None:
         self.columnconfigure(0, weight=1)
-        self.rowconfigure(1, weight=1)
+        self.rowconfigure(2, weight=1)
         header = ttk.Frame(self, padding=(16, 14, 16, 8))
         header.grid(row=0, column=0, sticky="ew")
         header.columnconfigure(1, weight=1)
@@ -229,8 +246,21 @@ class GameCatalogApp(tk.Tk):
         ttk.Radiobutton(header, text="リスト", variable=self.view_var, value="list", command=self._switch_view).grid(row=0, column=3, padx=(12, 2))
         ttk.Radiobutton(header, text="画像", variable=self.view_var, value="cards", command=self._switch_view).grid(row=0, column=4, padx=(2, 0))
 
+        filters = ttk.Frame(self, padding=(16, 0, 16, 8))
+        filters.grid(row=1, column=0, sticky="ew")
+        ttk.Label(filters, text="ジャンル").pack(side="left")
+        self.genre_filter = tk.StringVar(value="すべて")
+        self.genre_combo = ttk.Combobox(filters, textvariable=self.genre_filter, values=("すべて", *GENRES), state="readonly", width=12)
+        self.genre_combo.pack(side="left", padx=(6, 16))
+        self.genre_combo.bind("<<ComboboxSelected>>", lambda _event: self.refresh())
+        ttk.Label(filters, text="発売年").pack(side="left")
+        self.year_filter = tk.StringVar(value="すべて")
+        self.year_combo = ttk.Combobox(filters, textvariable=self.year_filter, values=("すべて",), state="readonly", width=12)
+        self.year_combo.pack(side="left", padx=(6, 0))
+        self.year_combo.bind("<<ComboboxSelected>>", lambda _event: self.refresh())
+
         body = ttk.Frame(self, padding=(16, 0, 16, 12))
-        body.grid(row=1, column=0, sticky="nsew")
+        body.grid(row=2, column=0, sticky="nsew")
         body.columnconfigure(0, weight=1)
         body.rowconfigure(0, weight=1)
         self.results = ttk.Frame(body)
@@ -239,7 +269,8 @@ class GameCatalogApp(tk.Tk):
         self.results.rowconfigure(0, weight=1)
         self.tree = ttk.Treeview(self.results, columns=[c[0] for c in self.COLUMNS], show="headings", selectmode="browse")
         for key, label, width in self.COLUMNS:
-            self.tree.heading(key, text=label)
+            heading = f"{label} ▲" if key == self.sort_key else label
+            self.tree.heading(key, text=heading, command=lambda k=key: self.sort_by(k))
             self.tree.column(key, width=width, minwidth=55, anchor="w")
         self.tree.column("image_path", width=0, stretch=False)
         self.tree.grid(row=0, column=0, sticky="nsew")
@@ -264,7 +295,7 @@ class GameCatalogApp(tk.Tk):
         self.detail_text.grid(row=0, column=0, sticky="ew")
 
         footer = ttk.Frame(self, padding=(16, 0, 16, 14))
-        footer.grid(row=2, column=0, sticky="ew")
+        footer.grid(row=3, column=0, sticky="ew")
         self.count_label = ttk.Label(footer, text="0 件")
         self.count_label.pack(side="left")
         ttk.Button(footer, text="削除", command=self.delete_game).pack(side="right", padx=(8, 0))
@@ -278,7 +309,16 @@ class GameCatalogApp(tk.Tk):
     def refresh(self) -> None:
         selected = self.tree.selection()[0] if self.tree.selection() else None
         self.tree.delete(*self.tree.get_children())
-        rows = self.db.list_games(self.search_var.get().strip())
+        rows = self.db.list_games(
+            self.search_var.get().strip(),
+            "" if self.genre_filter.get() == "すべて" else self.genre_filter.get(),
+            "" if self.year_filter.get() == "すべて" else self.year_filter.get(),
+        )
+        self._update_year_filter()
+        populated = [game for game in rows if (game[self.sort_key] or "").strip()]
+        empty = [game for game in rows if not (game[self.sort_key] or "").strip()]
+        populated.sort(key=lambda game: self._sort_value(self.sort_key, game[self.sort_key]), reverse=self.sort_reverse)
+        rows = populated + empty
         for game in rows:
             self.tree.insert("", "end", iid=str(game["id"]), values=tuple(game[c[0]] or "" for c in self.COLUMNS))
         self._render_cards(rows)
@@ -287,6 +327,44 @@ class GameCatalogApp(tk.Tk):
             self.tree.selection_set(selected)
         else:
             self._set_detail("")
+
+    @staticmethod
+    def _sort_value(key: str, value: str):
+        value = (value or "").strip()
+        if key in ("release_year", "reader_race_rank") and value.isdecimal():
+            return (0, int(value))
+        if key == "reader_race_score":
+            try:
+                return (0, Decimal(value))
+            except Exception:
+                pass
+        return (1, value.casefold())
+
+    def sort_by(self, key: str) -> None:
+        if key == "image_path":
+            return
+        if self.sort_key == key:
+            self.sort_reverse = not self.sort_reverse
+        else:
+            self.sort_key = key
+            self.sort_reverse = False
+        for column, label, _width in self.COLUMNS:
+            heading = label
+            if column == self.sort_key:
+                heading += " ▼" if self.sort_reverse else " ▲"
+            self.tree.heading(column, text=heading)
+        self.refresh()
+
+    def _update_year_filter(self) -> None:
+        current = self.year_filter.get()
+        years = [row[0] for row in self.db.connection.execute(
+            "SELECT DISTINCT release_year FROM games WHERE release_year <> ''"
+        )]
+        years.sort(key=lambda year: (0, int(year)) if year.isdecimal() else (1, year.casefold()))
+        choices = ("すべて", *years)
+        self.year_combo.configure(values=choices)
+        if current not in choices:
+            self.year_filter.set("すべて")
 
     def _switch_view(self) -> None:
         if self.view_var.get() == "cards":
@@ -390,7 +468,7 @@ class GameCatalogApp(tk.Tk):
             with open(path, "w", newline="", encoding="utf-8-sig") as file:
                 writer = csv.writer(file)
                 writer.writerow([label for _key, label in CSV_FIELDS])
-                writer.writerow(["サンプルタイトル", "Sample Game", "セガ", "1990", "日本", "アクション", "1", "6.2934", "", "サンプル行。登録前に削除してください"])
+                writer.writerow(["サンプルタイトル", "Sample Game", "セガ", "1990", "日本", "ACT", "1", "6.2934", "", "サンプル行。登録前に削除してください"])
             messagebox.showinfo("保存しました", "CSVテンプレートを保存しました。サンプル行を置き換えてご利用ください。", parent=self)
         except OSError as error:
             messagebox.showerror("保存できません", str(error), parent=self)
@@ -441,12 +519,15 @@ class GameCatalogApp(tk.Tk):
                 errors.append(f"{line}行目: タイトルが空です")
                 continue
             score = game["reader_race_score"]
-            if score and not re.fullmatch(r"[0-9]\.[0-9]{4}", score):
-                errors.append(f"{line}行目: スコアは0.0000〜9.9999の小数4桁で入力してください")
+            if score and not re.fullmatch(r"[0-9](?:\.[0-9]{1,4})?", score):
+                errors.append(f"{line}行目: スコアは整数または小数点以下1〜4桁、最大9.9999で入力してください")
                 continue
             rank = game["reader_race_rank"]
             if rank and (not rank.isdecimal() or int(rank) < 1):
                 errors.append(f"{line}行目: 順位は1以上の整数で入力してください")
+                continue
+            if game["genre"] and game["genre"] not in GENRES:
+                errors.append(f"{line}行目: ジャンル「{game['genre']}」は選択肢にありません")
                 continue
             image_path = game["image_path"]
             if image_path and not Path(image_path).is_absolute():
