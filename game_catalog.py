@@ -238,6 +238,7 @@ class GameCatalogApp(tk.Tk):
         self.minsize(760, 450)
         self.sort_key = "title"
         self.sort_reverse = False
+        self.search_committed = ""
         self.available_columns = tuple(key for key, _label, _width in self.COLUMNS if key != "image_path")
         try:
             saved_columns = json.loads(self.db.get_setting("visible_columns") or "null")
@@ -267,11 +268,12 @@ class GameCatalogApp(tk.Tk):
         self.search_var = tk.StringVar()
         search = ttk.Entry(header, textvariable=self.search_var, width=32)
         search.grid(row=0, column=2, sticky="ew", padx=(8, 0))
+        search.bind("<Return>", lambda _event: self.run_search())
         header.columnconfigure(2, weight=1)
-        self.search_var.trace_add("write", lambda *_: self.refresh())
+        ttk.Button(header, text="検索", command=self.run_search).grid(row=0, column=3, padx=(8, 0))
         self.view_var = tk.StringVar(value="list")
-        ttk.Radiobutton(header, text="リスト", variable=self.view_var, value="list", command=self._switch_view).grid(row=0, column=3, padx=(12, 2))
-        ttk.Radiobutton(header, text="画像", variable=self.view_var, value="cards", command=self._switch_view).grid(row=0, column=4, padx=(2, 0))
+        ttk.Radiobutton(header, text="リスト", variable=self.view_var, value="list", command=self._switch_view).grid(row=0, column=4, padx=(12, 2))
+        ttk.Radiobutton(header, text="画像", variable=self.view_var, value="cards", command=self._switch_view).grid(row=0, column=5, padx=(2, 0))
 
         filters = ttk.Frame(self, padding=(16, 0, 16, 8))
         filters.grid(row=1, column=0, sticky="ew")
@@ -339,7 +341,7 @@ class GameCatalogApp(tk.Tk):
         selected = self.tree.selection()[0] if self.tree.selection() else None
         self.tree.delete(*self.tree.get_children())
         rows = self.db.list_games(
-            self.search_var.get().strip(),
+            self.search_committed,
             "" if self.genre_filter.get() == "すべて" else self.genre_filter.get(),
             "" if self.year_filter.get() == "すべて" else self.year_filter.get(),
         )
@@ -356,6 +358,10 @@ class GameCatalogApp(tk.Tk):
             self.tree.selection_set(selected)
         else:
             self._set_detail("")
+
+    def run_search(self) -> None:
+        self.search_committed = self.search_var.get().strip()
+        self.refresh()
 
     @staticmethod
     def _sort_value(key: str, value: str):
